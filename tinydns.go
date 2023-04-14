@@ -134,13 +134,13 @@ func (t *TinyDNS) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 				dnsRecord.AAAA = append(dnsRecord.AAAA, recordType.AAAA.String())
 				log.Printf("AAAAA record %s", dnsRecord.AAAA)
 				if extDomain {
-					addExtsSetElement("exts6", recordType.AAAA.String())
+					addExtsSetElement(t.options.V6set, recordType.AAAA.String())
 				}
 			case *dns.A:
 				dnsRecord.A = append(dnsRecord.A, recordType.A.String())
 				log.Printf("A record %s", dnsRecord.A)
 				if extDomain {
-					addExtsSetElement("exts", recordType.A.String())
+					addExtsSetElement(t.options.V4set, recordType.A.String())
 				}
 			}
 		}

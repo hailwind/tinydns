@@ -12,6 +12,8 @@ type Options struct {
 	LocalAddr       string
 	DefaultUpServer []string
 	UpServerMap     map[string][]string
+	V4set           string
+	V6set           string
 	// TTL             time.Duration
 	// UpstreamServers_i []string
 	// UpstreamServers_e []string
