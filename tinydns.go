@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/gob"
 	"fmt"
+	"log"
 	"net"
 	"strings"
 
@@ -15,7 +16,8 @@ import (
 type TinyDNS struct {
 	options    *Options
 	server     *dns.Server
-	hm         *hybrid.HybridMap
+	hmv4       *hybrid.HybridMap
+	hmv6       *hybrid.HybridMap
 	OnServeDns func(data Info)
 }
 
@@ -28,24 +30,38 @@ type Info struct {
 }
 
 func New(options *Options) (*TinyDNS, error) {
-	hm, err := hybrid.New(hybrid.DefaultDiskOptions)
+	hmv4, err := hybrid.New(hybrid.DefaultDiskOptions)
+	hmv6, err := hybrid.New(hybrid.DefaultDiskOptions)
 	if err != nil {
 		return nil, err
 	}
 
 	tinydns := &TinyDNS{
 		options: options,
-		hm:      hm,
+		hmv4:    hmv4,
+		hmv6:    hmv6,
 	}
 
 	srv := &dns.Server{
-		Addr:    options.ListenAddress,
+		Addr:    options.ListenAddr,
 		Net:     options.Net,
 		Handler: tinydns,
 	}
 	tinydns.server = srv
 
 	return tinydns, nil
+}
+
+func (t *TinyDNS) GetUpstreamServer(domain string) (upstreamserver string, extDomain bool) {
+	exts := GetExts()
+	isExtDomain, upServerGroup := exts.IsExtDomain(domain)
+	if isExtDomain {
+		extUpServer := t.options.UpServerMap[upServerGroup]
+		log.Printf("upServerGroup: %s extUpServer: %s", upServerGroup, extUpServer)
+		return sliceutil.PickRandom(extUpServer), true
+	} else {
+		return sliceutil.PickRandom(t.options.DefaultUpServer), false
+	}
 }
 
 func (t *TinyDNS) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
@@ -59,79 +75,94 @@ func (t *TinyDNS) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		t.OnServeDns(info)
 	}
 	switch r.Question[0].Qtype {
-	case dns.TypeA:
-		// attempts in order to retrieve the record in the following fallback-chain
-		if dnsRecord, ok := t.options.DnsRecords[domainlookup]; ok { // - hardcoded records
-			info.Domain = domainlookup
-			info.Operation = "in-memory"
-			info.Wildcard = false
-			info.Msg = fmt.Sprintf("Using in-memory record for %s.\n", domainlookup)
-			if t.OnServeDns != nil {
-				t.OnServeDns(info)
-			}
-			_ = w.WriteMsg(reply(r, domain, dnsRecord))
-
-		} else if dnsRecord, ok = t.options.DnsRecords["*"]; ok { // - wildcard
-			info.Domain = domainlookup
-			info.Operation = "in-memory"
-			info.Wildcard = true
-			info.Msg = fmt.Sprintf("Using in-memory wildcard record for %s.\n", domainlookup)
-			if t.OnServeDns != nil {
-				t.OnServeDns(info)
-			}
-			_ = w.WriteMsg(reply(r, domain, dnsRecord))
-		} else if dnsRecordBytes, ok := t.hm.Get(domain); ok { // - cache
+	case dns.TypeAAAA:
+		if dnsRecordBytes, ok := t.hmv6.Get(domain); ok { // - cache
 			dnsRecord := &DnsRecord{}
 			err := gob.NewDecoder(bytes.NewReader(dnsRecordBytes)).Decode(dnsRecord)
 			if err == nil {
 				info.Domain = domainlookup
 				info.Operation = "cached"
 				info.Wildcard = false
-				info.Msg = fmt.Sprintf("Using cached record for %s.\n", domainlookup)
+				info.Msg = fmt.Sprintf("Using cached AAAA record for %s record: %s.\n", domainlookup, dnsRecord)
 				if t.OnServeDns != nil {
 					t.OnServeDns(info)
 				}
 				_ = w.WriteMsg(reply(r, domain, dnsRecord))
+				return
 			}
-		} else if len(t.options.UpstreamServers) > 0 {
-			// upstream and store in cache
-			upstreamServer := sliceutil.PickRandom(t.options.UpstreamServers)
-			info.Domain = domainlookup
-			info.Operation = "cached"
-			info.Wildcard = false
-			info.Upstream = upstreamServer
-			info.Msg = fmt.Sprintf("Retrieving records for %s with upstream %s.\n", domainlookup, upstreamServer)
-			if t.OnServeDns != nil {
-				t.OnServeDns(info)
-			}
-			msg, err := dns.Exchange(r, upstreamServer)
+		}
+	case dns.TypeA:
+		if dnsRecordBytes, ok := t.hmv4.Get(domain); ok { // - cache
+			dnsRecord := &DnsRecord{}
+			err := gob.NewDecoder(bytes.NewReader(dnsRecordBytes)).Decode(dnsRecord)
 			if err == nil {
-				_ = w.WriteMsg(msg)
-				dnsRecord := &DnsRecord{}
-				for _, record := range msg.Answer {
-					switch recordType := record.(type) {
-					case *dns.A:
-						dnsRecord.A = append(dnsRecord.A, recordType.A.String())
-					case *dns.AAAA:
-						dnsRecord.AAAA = append(dnsRecord.AAAA, recordType.AAAA.String())
-					}
+				info.Domain = domainlookup
+				info.Operation = "cached"
+				info.Wildcard = false
+				info.Msg = fmt.Sprintf("Using cached A record for %s record %s.\n", domainlookup, dnsRecord)
+				if t.OnServeDns != nil {
+					t.OnServeDns(info)
 				}
-				var dnsRecordBytes bytes.Buffer
-				if err := gob.NewEncoder(&dnsRecordBytes).Encode(dnsRecord); err == nil {
-					info.Domain = domainlookup
-					info.Operation = "saving"
-					info.Wildcard = false
-					info.Upstream = upstreamServer
-					info.Msg = fmt.Sprintf("Saving records for %s in cache.\n", domainlookup)
-					if t.OnServeDns != nil {
-						t.OnServeDns(info)
-					}
-					_ = t.hm.Set(domain, dnsRecordBytes.Bytes())
-				}
+				_ = w.WriteMsg(reply(r, domain, dnsRecord))
+				return
 			}
 		}
 	}
-	_ = w.WriteMsg(reply(r, domain, &DnsRecord{}))
+
+	upstreamServer, extDomain := t.GetUpstreamServer(domainlookup)
+	info.Domain = domainlookup
+	info.Operation = "cached"
+	info.Wildcard = false
+	info.Upstream = upstreamServer
+	info.Msg = fmt.Sprintf("Retrieving records for %s with upstream %s.\n", domainlookup, upstreamServer)
+	if t.OnServeDns != nil {
+		t.OnServeDns(info)
+	}
+	var msg *dns.Msg
+	var err error
+	if extDomain && t.options.LocalAddr != "0.0.0.0:53" {
+		msg, err = dns.ExchangeWithSource(r, upstreamServer, t.options.LocalAddr)
+	} else {
+		msg, err = dns.Exchange(r, upstreamServer)
+	}
+	if err == nil {
+		_ = w.WriteMsg(msg)
+		dnsRecord := &DnsRecord{}
+		for _, record := range msg.Answer {
+			switch recordType := record.(type) {
+			case *dns.AAAA:
+				dnsRecord.AAAA = append(dnsRecord.AAAA, recordType.AAAA.String())
+				log.Printf("AAAAA record %s", dnsRecord.AAAA)
+				if extDomain {
+					addExtsSetElement("exts6", recordType.AAAA.String())
+				}
+			case *dns.A:
+				dnsRecord.A = append(dnsRecord.A, recordType.A.String())
+				log.Printf("A record %s", dnsRecord.A)
+				if extDomain {
+					addExtsSetElement("exts", recordType.A.String())
+				}
+			}
+		}
+		var dnsRecordBytes bytes.Buffer
+		if err := gob.NewEncoder(&dnsRecordBytes).Encode(dnsRecord); err == nil {
+			info.Domain = domainlookup
+			info.Operation = "saving"
+			info.Wildcard = false
+			info.Upstream = upstreamServer
+			info.Msg = fmt.Sprintf("Saving records for %s record %sin cache.\n", domainlookup, dnsRecord)
+			if t.OnServeDns != nil {
+				t.OnServeDns(info)
+			}
+			switch r.Question[0].Qtype {
+			case dns.TypeAAAA:
+				_ = t.hmv6.Set(domain, dnsRecordBytes.Bytes())
+			case dns.TypeA:
+				_ = t.hmv4.Set(domain, dnsRecordBytes.Bytes())
+			}
+		}
+		_ = w.WriteMsg(reply(r, domain, &DnsRecord{}))
+	}
 }
 
 func reply(r *dns.Msg, domain string, dnsRecord *DnsRecord) *dns.Msg {
@@ -146,7 +177,7 @@ func reply(r *dns.Msg, domain string, dnsRecord *DnsRecord) *dns.Msg {
 	}
 	for _, aaaa := range dnsRecord.AAAA {
 		msg.Answer = append(msg.Answer, &dns.AAAA{
-			Hdr:  dns.RR_Header{Name: domain, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+			Hdr:  dns.RR_Header{Name: domain, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 60},
 			AAAA: net.ParseIP(aaaa),
 		})
 	}
@@ -158,5 +189,6 @@ func (t *TinyDNS) Run() error {
 }
 
 func (t *TinyDNS) Close() {
-	t.hm.Close()
+	t.hmv4.Close()
+	t.hmv6.Close()
 }

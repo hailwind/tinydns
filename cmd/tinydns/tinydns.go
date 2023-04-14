@@ -1,40 +1,25 @@
 package main
 
 import (
+	"log"
 	"os"
 	"os/signal"
 
-	"github.com/projectdiscovery/goflags"
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/tinydns"
 )
 
 func main() {
 	options := &tinydns.Options{}
-
-	flagSet := goflags.NewFlagSet()
-	flagSet.SetDescription(`tinydns - Embeddable dns server.`)
-
-	flagSet.BoolVar(&options.DiskCache, "disk", true, "Use disk cache")
-	flagSet.StringVar(&options.ListenAddress, "listen", "127.0.0.1:53", "Listen Address")
-	flagSet.StringVar(&options.Net, "net", "udp", "Network (tcp, udp)")
-	var upstreamServers goflags.StringSlice
-	flagSet.StringSliceVar(&upstreamServers, "upstream", []string{"1.1.1.1:53"}, "Upstream servers", goflags.FileCommaSeparatedStringSliceOptions)
-
-	if err := flagSet.Parse(); err != nil {
-		gologger.Fatal().Msgf("Could not parse options: %s\n", err)
-	}
-
-	// command line types are converted to standard ones
-	options.UpstreamServers = upstreamServers
-
+	tinydns.LoadOptions(options)
+	log.Printf("options.UpServerMap: %s", options.UpServerMap)
 	tdns, err := tinydns.New(options)
 	if err != nil {
 		gologger.Fatal().Msgf("Could not create tinydns instance: %s\n", err)
 	}
-	gologger.Info().Msgf("Listening on: %s:%s\n", options.Net, options.ListenAddress)
+	gologger.Info().Msgf("Listening on: %s:%s\n", options.Net, options.ListenAddr)
 	tdns.OnServeDns = func(data tinydns.Info) {
-		gologger.Info().Msgf("%s\n", data.Msg)
+		gologger.Info().Msgf("%s", data.Msg)
 	}
 
 	// Setup graceful exits

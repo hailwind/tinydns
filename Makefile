@@ -7,7 +7,7 @@ GOGET=$(GOCMD) get
     
 all: build
 build:
-		$(GOBUILD) -v -ldflags="-extldflags=-static" -o "tinydns" cmd/tinydns/tinydns.go
+		@GOOS=linux $(GOBUILD) -v -ldflags="-linkmode=external -extldflags=-static" -o "tinydns" cmd/tinydns/tinydns.go
 test: 
 		$(GOTEST) -v ./...
 tidy:
